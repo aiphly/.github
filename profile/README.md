@@ -6,3 +6,5 @@ AIの変化を、飛躍に変える。
 - [最新記事](https://aiphly.com/)
 - [広告・PR掲載](https://aiphly.com/advertise/)
 - [編集方針](https://aiphly.com/editorial-policy/)
+
+<!-- aiphly-automerge e2e verification: 2026-08-29 -->
