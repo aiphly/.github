@@ -1,0 +1,47 @@
+name: AI auto-merge
+
+on:
+  workflow_run:
+    workflows: [profile-ci]
+    types: [completed]
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: profile-automerge-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  merge:
+    if: vars.AI_AUTOMERGE_ENABLED == 'true' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create short-lived GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.AI_MERGE_APP_ID }}
+          private-key: ${{ secrets.AI_MERGE_PRIVATE_KEY }}
+      - name: Revalidate and squash merge
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          prs="$(gh api --paginate --slurp -H 'Accept: application/vnd.github+json' "repos/${REPOSITORY}/commits/${HEAD_SHA}/pulls" | jq '[.[][] | select(.state == "open" and .base.ref == "main" and .head.repo.full_name == env.REPOSITORY and (.head.ref | startswith("claude/")) and any(.labels[]; .name == "ai/automerge"))]')"
+          test "$(jq 'length' <<<"$prs")" -eq 1 || { echo "Exactly one eligible PR is required"; exit 1; }
+          pr="$(jq -r '.[0].number' <<<"$prs")"
+          test "$(gh api "repos/${REPOSITORY}/pulls/${pr}" --jq '.head.sha')" = "$HEAD_SHA" || { echo "Stale CI SHA"; exit 1; }
+          checks="$(gh api --paginate --slurp "repos/${REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" | jq '[.[] | .check_runs[] | select(.name != "merge")]')"
+          jq -e 'length > 0 and all(.[]; .status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped"))' <<<"$checks" >/dev/null || exit 1
+          mergeable="$(gh api "repos/${REPOSITORY}/pulls/${pr}" --jq '.mergeable')"
+          test "$mergeable" = "true" || { echo "PR is not mergeable"; exit 1; }
+          test "$(gh api "repos/${REPOSITORY}/pulls/${pr}" --jq '.head.sha')" = "$HEAD_SHA"
+          gh api --method PUT "repos/${REPOSITORY}/pulls/${pr}/merge" -f merge_method=squash -f sha="$HEAD_SHA" --jq '.merged' | grep -qx true
+          gh api --method DELETE "repos/${REPOSITORY}/git/refs/heads/$(jq -r '.[0].head.ref' <<<"$prs")"

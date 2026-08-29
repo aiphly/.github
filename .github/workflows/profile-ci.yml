@@ -1,0 +1,74 @@
+name: profile-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: profile-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate public profile
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          path = pathlib.Path("profile/README.md")
+          text = path.read_text(encoding="utf-8")
+          required = {
+              "https://aiphly.com",
+              "https://aiphly.com/",
+              "https://aiphly.com/advertise/",
+              "https://aiphly.com/editorial-policy/",
+          }
+          links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
+          errors = []
+          if text.count("[") != text.count("]") or text.count("(") != text.count(")"):
+              errors.append("unbalanced Markdown link delimiters")
+          if not required.issubset(links):
+              errors.append(f"missing required HTTPS links: {sorted(required - set(links))}")
+          if any(not link.startswith("https://") for link in links):
+              errors.append("every link must use HTTPS")
+          if re.search(r"github\.com/aiphly/(ai-content-hub|remotion-short-video|astro-site|note-drafts)", text, re.I):
+              errors.append("profile links to a private repository")
+          secret_patterns = [
+              r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+              r"gh[pousr]_[A-Za-z0-9_]{20,}",
+              r"github_pat_[A-Za-z0-9_]{20,}",
+              r"sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}",
+              r"(?i)(api[_-]?key|client[_-]?secret|access[_-]?token)\s*[:=]\s*\S+",
+          ]
+          if any(re.search(pattern, text) for pattern in secret_patterns):
+              errors.append("profile contains a secret-like string")
+          if errors:
+              raise SystemExit("\n".join(errors))
+          print("Public profile syntax, links, HTTPS policy, and secret scan passed.")
+          PY
+
+      - name: Enforce immutable approved actions
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          allowed = {"actions/checkout", "actions/create-github-app-token"}
+          pattern = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", re.M)
+          for path in pathlib.Path(".github/workflows").glob("*.yml"):
+              for value in pattern.findall(path.read_text(encoding="utf-8")):
+                  action, _, ref = value.partition("@")
+                  if action not in allowed or not re.fullmatch(r"[0-9a-f]{40}", ref):
+                      raise SystemExit(f"unapproved or mutable action: {value}")
+          print("All actions are approved and pinned to full SHAs.")
+          PY
